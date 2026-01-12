@@ -1,4 +1,4 @@
-# SOCD-ahk
+# SOCD-ahk ![SOCD](SOCD.png)
 An SOCD script recreated using AHK built to simulate hardware SOCD via AutoHotkey v2
 
 # SOCD-AHK Script
