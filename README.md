@@ -133,6 +133,8 @@ When enabled:
 
 This closely mimics real SOCD hardware behavior.
 
+### WARNING: IT'S VERY UNSTABLE USING MODES OTHER THAN LAST INPUT MODE!
+
 ---
 
 ## Split Direction Lanes (WS / AD)  
