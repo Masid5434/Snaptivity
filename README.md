@@ -364,7 +364,6 @@ consider turning it off if you see StuckKeys that bypass checkstuck keys
 Provides direct access to controlled crash types for testing engine recovery.
 
 Available crash types include:
-![
 - Soft exception
 - Hard process termination
 - Infinite loop freeze
@@ -372,7 +371,8 @@ Available crash types include:
 - Memory exhaustion
 - Invalid DLL calls
 - Timer storms
-- Self-destruct & respawn](Assets/Snaptivity-crashlist)
+- Self-destruct & respawn
+![Crash-types](Assets/Snaptivity-crashlist)
 
 Purpose:
 - Validate watchdog behavior
