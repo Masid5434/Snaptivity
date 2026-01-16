@@ -2,8 +2,6 @@
 #SingleInstance Force
 #UseHook
 
-A_MaxHotkeysPerInterval := 200
-
 ProcessSetPriority("High")
 
 ; Close existing CONTROL PANEL if any
@@ -36,6 +34,12 @@ global statusText := ""
 global goBtn := ""
 global pickedKey := ""
 
+global ncoderMode := false
+global osdLetters := []
+global osdColors  := []
+global gradientTimerRunning := false
+global cbNcoder := ""
+
 ; Picker GUI state (Menu toggle)
 global menuPickerGui := ""
 global menuStatusText := ""
@@ -57,6 +61,23 @@ global latencyCount := 0
 global lastLatency := 0
 global t0 := 0
 global latencyAvg := 0
+
+; Int Crash
+global intentionalCrash := false
+
+OnError(HandleIntentionalCrash)
+
+HandleIntentionalCrash(e, mode) {
+    global intentionalCrash
+
+    if (intentionalCrash) {
+        ; swallow error window completely
+        return true   ; tells AHK: "handled, don’t show error dialog"
+    }
+
+    ; otherwise allow normal AHK error popup
+    return false
+}
 
 ; Latency OSD position offsets
 global latencyOffsetX := 0   ; move left/right
@@ -132,6 +153,37 @@ global lastTTCtrl := ""
 ; Globalize this or wont run
 global cbDebug := ""
 global cbSnappy := ""
+; Core folder
+global CoreDir := A_ScriptDir "\Core"
+
+if !DirExist(CoreDir)
+    DirCreate(CoreDir)
+
+; crash isnide CoreDir
+global CrashBaseDir := CoreDir "\crashes"
+global CrashRecoveredDir := CrashBaseDir "\History"
+global CrashFailedDir := CrashBaseDir "\Current"
+
+for dir in [CrashBaseDir, CrashRecoveredDir, CrashFailedDir] {
+    if !DirExist(dir)
+        DirCreate(dir)
+}
+
+; Lcrash
+global LastCrashError := ""
+OnError(CaptureCrashError)
+
+; make watchdog here global
+global watchdogFile := CoreDir "\watchdog.mem"
+
+global Safemod := true   ; true = supervision ON, false = UNCHAINED
+
+global suppressOSD := false
+
+global gradientTarget := "osd"   ; "osd" or "ncoder"
+
+; add traytip for traytipcooldown for for for for for fro watchdog
+global trayTipCooldown := false
 
 OnMessage(0x200, WM_MOUSEMOVE)  ; 0x200 = WM_MOUSEMOVE
 
@@ -374,11 +426,18 @@ InitConfig() {
         IniWrite(4, configFile, "HUD", "LatencyOffsetY")
         IniWrite(1, configFile, "Settings", "SnappyMode")
         IniWrite(0, configFile, "Settings", "TrulySnappy")
+        IniWrite(0, configFile, "Fun", "NcoderMode")
+        IniWrite(1, configFile, "Advanced-Settings", "Safemod")
     }
 }
 
 SaveConfig() {
-    global toggleKey, menuToggleKey, neutralizeMode, splitLanes, debugOverlay, hudX, hudY, keySize, latencyOffsetX, latencyOffsetY, traceLatency, configFile
+    global toggleKey, menuToggleKey, neutralizeMode, splitLanes, debugOverlay
+    global hudX, hudY, keySize, snappyMode, trayTipsEnabled
+    global absUnifiedKey, absSplitHKey, absSplitVKey
+    global traceLatency, latencyOffsetX, latencyOffsetY
+    global trulySnappy, blockPhysical, ncoderMode, Safemod
+
 
     IniWrite(toggleKey, configFile, "Keys", "Snaptivity_Toggle")
     IniWrite(menuToggleKey, configFile, "Keys", "Menu_Toggle")
@@ -398,6 +457,8 @@ SaveConfig() {
     IniWrite(latencyOffsetX, configFile, "HUD", "LatencyOffsetX")
     IniWrite(latencyOffsetY, configFile, "HUD", "LatencyOffsetY")
     IniWrite(trulySnappy, configFile, "Settings", "TrulySnappy")
+    IniWrite(ncoderMode, configFile, "Fun", "NcoderMode")
+    IniWrite(Safemod, configFile, "Advanced-Settings", "Safemod")
 }
 
 LoadConfig() {
@@ -407,6 +468,7 @@ LoadConfig() {
     global snappyMode, trayTipsEnabled, blockPhysical
     global absUnifiedKey, absSplitHKey, absSplitVKey
     global traceLatency, latencyOffsetX, latencyOffsetY
+    global trulySnappy, ncoderMode, Safemod
 
     toggleKey       := IniLoadD("Keys", "Snaptivity_Toggle", "", "string")
     menuToggleKey   := IniLoadD("Keys", "Menu_Toggle", "", "string")
@@ -417,7 +479,7 @@ LoadConfig() {
 
     snappyMode      := IniLoadD("Settings", "SnappyMode", 1, "bool")
     trayTipsEnabled := IniLoadD("Settings", "TrayTips", 1, "bool")
-    blockPhysical   := IniLoadD("Settings", "BlockPhysical", 0, "bool")
+    blockPhysical   := IniLoadD("Advanced-Settings", "BlockPhysical", 0, "bool")
 
     hudX := IniLoadD("HUD", "X", 40, "int")
     hudY := IniLoadD("HUD", "Y", 220, "int")
@@ -434,6 +496,16 @@ LoadConfig() {
 
     trulySnappy := IniLoadD("Settings", "TrulySnappy", 0, "bool")
 
+    ncoderMode := IniLoadD("Fun", "NcoderMode", 0, "bool")
+
+    Safemod := IniLoadD("Advanced-Settings", "Safemod", 0, "bool")
+
+    ; FORCE ENGINE STATE BEFORE UI EXISTS
+    if (trulySnappy)
+        EnableEngineOverclock()
+    else
+        DisableEngineOverclock()
+
     return (toggleKey != "" && menuToggleKey != "")
 }
 
@@ -449,24 +521,69 @@ osdGui.SetFont("s13 Bold", "Segoe UI")
 global osdText := osdGui.AddText("c00FF00", "Snaptivity: OFF")
 
 UpdateOSD() {
-    global szodActive, osdGui, osdText
+    global szodActive, osdGui, osdText, ncoderMode
 
     if (szodActive) {
-        osdText.Text := "Snaptivity: ON"
-        osdText.Opt("c00FFFF")
+        if (ncoderMode) {
+            osdText.Visible := false
+            for txt in osdLetters
+                txt.Visible := true
+
+            osdGui.Show("NoActivate")
+            StartGradientOSD()
+        } else {
+            StopGradientOSD()
+            for txt in osdLetters                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              ; Hi
+                txt.Visible := false
+
+            osdText.Visible := true
+            osdText.Text := "Snaptivity: ON"
+            osdText.Opt("c" GetRandomSafeColor())
+            osdGui.Show("NoActivate")
+        }
     } else {
+        StopGradientOSD()
+        for txt in osdLetters
+            txt.Visible := false
+
+        osdText.Visible := true
         osdText.Text := "Snaptivity: OFF"
         osdText.Opt("cFF3333")
+        osdGui.Show("NoActivate")
     }
 
-    osdGui.Show("NoActivate")
+
     SetTimer(HideOSD, 0)
     SetTimer(HideOSD, -2000)
 }
 
+
+
 HideOSD() {
     global osdGui
     osdGui.Hide()
+}
+
+GetRandomSafeColor() {
+    ; Avoid red / orange rage colors
+    ; Using bright cyber colors only
+    colors := [
+        "00FFFF", ; cyan
+        "00FFAF", ; spring blue
+        "00FFAA", ; aqua green
+        "66FF66", ; neon green
+        "3399FF", ; electric blue
+        "9966FF", ; purple
+        "FF66FF", ; pink neon
+        "66FFFF", ; ice blue
+        "33FFCC", ; mint
+        "6699FF"  ; soft blue
+        "FF66CC"  ; magenta
+        "FF99CC"  ; light pink
+    ]
+
+    r := Random(1, colors.Length)
+    return colors[r]
 }
 
 ; ======================================================
@@ -475,7 +592,14 @@ HideOSD() {
 
 InitConfig()
 LoadConfig()
+if (Safemod){
+    LoadStateRAM()
+    SaveStateRAM()  ; ensure watchdog file exists atleast once (recommented)
+    SetTimer(SaveStateRAM, 500)
+}
 ApplySnappyState()
+CreateGradientOSD()
+SetTimer(() => MarkLastCrashRecovered(), -3000)
 
 if (toggleKey != "" && menuToggleKey != "") {
     Hotkey("$" toggleKey, (*) => ToggleSZOD())
@@ -1102,7 +1226,7 @@ ShowMenu() {
     global trayTipsEnabled, snappyMode, overrideMode
     global isResettingKey, cbDebug, blockPhysical
     global absUnifiedKey, absSplitHKey, absSplitVKey
-    global trulySnappy
+    global trulySnappy, ncoderMode
 
     global menuGui := Gui("+AlwaysOnTop -Caption +ToolWindow")
     menu := menuGui
@@ -1186,12 +1310,24 @@ ShowMenu() {
             debugOverlay = 0 ? "HUD: OFF" :
             debugOverlay = 1 ? "HUD: ON" :
                             "HUD: ULTRA MODE",
-            900
+            500
         ),
         UpdateDebugCheckboxStyle(),
         UpdateDebugOSD(),
         SaveConfig()
     ))
+    cbNcoder := menu.AddCheckbox("c8A00FF w300", "🗿 Ncoder Mode")
+    cbNcoder.Value := ncoderMode
+    cbNcoder.OnEvent("Click", (*) => (
+        ncoderMode := cbNcoder.Value,
+        SaveConfig(),
+        ShowTrayTip(
+            "NCODER MODE",
+            ncoderMode ? "🗿 Chaos erupts ACTIVATED" : "⚡ Ncoder is disabled",
+            1200
+        )
+    ))
+
 
     ; Override mode
     menu.AddText("c00FFFF w300", "⚡ Override Mode")
@@ -1246,6 +1382,7 @@ ShowMenu() {
     ; SHOW MENU FIRST
     menu.Show("AutoSize Center")
     UpdateDebugCheckboxStyle()
+    ApplySnappyState()
 
     ; ===== SETTINGS ICON (ADVANCED) =====
     titleBar.GetPos(&tx, &ty, &tw, &th)
@@ -1309,7 +1446,7 @@ ShowMenu() {
 
 ShowAdvancedMenu() {
     global blockPhysical, cbLegacy, hudLatency, debugGui, t0, cbTraceLatency, traceLatency
-    global latencyCount, latencySum, lastLatency
+    global latencyCount, latencySum, lastLatency, Safemod
 
     advGui := Gui("+AlwaysOnTop -Caption +ToolWindow")
     adv := advGui
@@ -1381,7 +1518,30 @@ ShowAdvancedMenu() {
         UpdateDebugOSD(),
         SaveConfig()
     ))
+    ; =========================
+    ; 🛡️ SAFEMOD TOGGLE
+    ; =========================
+    cbSafemod := adv.AddCheckbox("c66FF66 w300", "🛡️ SafeMode (Engine Supervision)")
+    cbSafemod.Value := Safemod
 
+    cbSafemod.OnEvent("Click", (*) => (
+        Safemod := cbSafemod.Value,
+        SaveConfig(),
+        ShowTrayTip(
+            "SAFEMOD",
+            Safemod
+                ? "🛡️ SafeMode ENABLED (Crash protection & watchdog active)"
+                : "☠️ SafeMode DISABLED (UNCHAINED MODE)",
+            1400
+        )
+    ))
+
+    ; =========================
+    ; 💥 MANUAL CRASH BUTTON
+    ; =========================
+    btnCrash := adv.AddButton("w300 h32", "CRASH NOW 💥")
+    btnCrash.Opt("BackgroundAA0000 cFFFFFF")
+    btnCrash.OnEvent("Click", (*) => ForceCrash())
 
     ; =========================
     ; BUTTONS
@@ -1406,8 +1566,105 @@ ShowAdvancedMenu() {
     btnClose.Opt("BackgroundAA3333 cFFFFFF")
     btnClose.OnEvent("Click", (*) => advGui.Destroy())
 }
+ForceCrash() {
+    crashGui := Gui("+AlwaysOnTop", "☠️ Crash Selector")
+    crashGui.BackColor := "0A0A0A"
+    crashGui.SetFont("s11 Bold", "Segoe UI")
+
+    crashGui.AddText("cFF4444 w300 Center", "CHOOSE HOW YOU WANT TO CRASH 💀")
+
+    ddl := crashGui.AddDropDownList("w300", [
+        "💥 Soft Crash (Exception)",
+        "💀 Hard Crash (TerminateProcess)",
+        "🌀 Freeze (Infinite Loop)",
+        "☠️ Exit(999) (Fake Crash)",
+        "🧨 Memory Corruption (Invalid Access)",
+        "⚡ Stack Overflow (Deep Recursion)",
+        "🧯 Resource Leak (RAM Bomb)",
+        "🕳️ Null Call (Invalid DLLCall)",
+        "🧬 Thread Explosion (Timer Storm)",
+        "🧬 Atomic Timer Storm (Heavy Parallelism)",
+        "🪓 Self Destruct (Kill & Respawn)"
+    ])
+    ddl.Value := 1
+
+    btnGo := crashGui.AddButton("w300 h32", "🔥 EXECUTE CRASH")
+    btnGo.Opt("Background550000 cFFFFFF")
+
+    btnGo.OnEvent("Click", (*) => (
+        crashType := ddl.Value,
+        crashGui.Destroy(),
+        ExecuteCrash(crashType)
+    ))
+
+    crashGui.Show("AutoSize Center")
+}
+
+ExecuteCrash(type) {
+    global intentionalCrash
+    intentionalCrash := true   ; ARM THE SILENCER
+    var := ""
+
+    switch type {
+
+        case 1: ; 💥 Soft crash (exception)
+            throw Error("SOFT CRASH TEST")
+
+        case 2: ; 💀 Hard kill
+            DllCall("TerminateProcess", "Ptr", DllCall("GetCurrentProcess", "Ptr"), "UInt", 1)
+
+        case 3: ; 🌀 Freeze
+            Loop {
+                ; infinite loop
+            }
+
+        case 4: ; ☠️ Fake crash
+            ExitApp(999)
+
+        case 5: ; 🧨 Memory corruption
+            x := []
+            MsgBox(x[999999999])   ; invalid index = runtime error
+
+        case 6: ; ⚡ Stack overflow
+            CrashRecursion()
+
+        case 7: ; 🧯 RAM bomb
+            arr := []
+            Loop 1000000 {
+                arr.Push(Random(1,999999))
+            }
+
+        case 8: ; 🕳️ Invalid DLLCall
+            DllCall("ThisFunctionDoesNotExist")
+
+        case 9: ; 🧬 Timer storm (parallel)
+            Loop 100 {
+                SetTimer(() => var = "a", 1)
+            }
+
+        case 10: ; 🧬 Timer storm (Atomic)
+            Loop 100 {
+                SetTimer(AtomicStormTick, 1)
+            }
 
 
+        case 11: ; 🪓 Kill & Respawn combo
+            Run('"' A_ScriptFullPath '"')
+            Sleep(100)
+            DllCall("TerminateProcess", "Ptr", DllCall("GetCurrentProcess", "Ptr"), "UInt", 1)
+    }
+}
+
+CrashRecursion() {
+    return CrashRecursion()
+}
+global CrashTick := 0
+AtomicStormTick() {
+    global CrashTick
+    Loop 100 {
+        CrashTick++
+    }
+}
 
 ; ======================================================
 ; KEY LIST
@@ -1565,10 +1822,16 @@ OverrideModeChanged(ctrl, *) {
 
 
 ShowTrayTip(title, text, time := 300) {
-    global trayTipsEnabled
+    global trayTipsEnabled, trayTipCooldown
+
+    ; hard mute during restart window
+    if (trayTipCooldown)
+        return
+
     if (trayTipsEnabled)
         TrayTip(title, text, time)
 }
+
 AttachToolTip(ctrl, text) {
     global toolTipMap
     toolTipMap[ctrl.Hwnd] := text
@@ -1766,6 +2029,44 @@ LegacyToggle() {
 TraceSend(cmd) {
     global traceLatency, lastLatency, latencyAvg, latencyCount
 
+    static lastTick := 0
+    static keyBurst := Map()
+    if (Safemod)
+        maxPerKey := 2   ; per key per frame
+    else
+        maxPerKey := 100   ; per key per frame
+
+    now := A_TickCount
+
+    ; Reset every frame (~60 FPS)
+    if (now - lastTick > 16) {
+        keyBurst.Clear()
+        lastTick := now
+    }
+
+    ; Extract key safely from "{Blind}{w down}"
+    ; Find the last {...}
+    pos := InStr(cmd, "{", false, -1)
+    if (pos) {
+        part := SubStr(cmd, pos + 1)
+        part := RegExReplace(part, "[{}]", "")
+        key := StrSplit(part, " ")[1]
+    } else {
+        key := "_unknown"
+    }
+
+    ; Init counter
+    if !keyBurst.Has(key)
+        keyBurst[key] := 0
+
+    ; Hard gate:
+    ; unlimited UP events
+    ; limited DOWN events
+    if (keyBurst[key] >= maxPerKey && !InStr(cmd, " up"))
+        return
+
+    keyBurst[key]++
+
     if (traceLatency)
         t0 := QPC_Now()
 
@@ -1786,6 +2087,7 @@ TraceSend(cmd) {
         UpdateLatencyOSD()
     }
 }
+
 
 
 GetAvgLatency() {
@@ -1870,4 +2172,315 @@ ForceAlwaysOnTop() {
     try latencyGui.Opt("+AlwaysOnTop")
     try osdGui.Opt("+AlwaysOnTop")
     try editOsdGui.Opt("+AlwaysOnTop")
+}
+if (Safemod)
+    SetTimer(CheckStuckKeys, 190)
+
+CheckStuckKeys() {
+    global physicalKeys
+
+    for k, v in physicalKeys {
+        if (v && !GetKeyState(k, "P")) {
+            physicalKeys[k] := false
+            Send("{Blind}{" k " up}")
+        }
+    }
+}
+SaveStateRAM() {
+    global watchdogFile
+    global currentSOD_H, currentSOD_V, currentSOD_All
+
+    ; make sure parent directory exists
+    SplitPath(watchdogFile, , &dir) ; this is magic idk how , , even works btu... it works... no touch this
+    if !DirExist(dir)
+        DirCreate(dir)
+
+    state :=
+    (
+    "H=" currentSOD_H "`n" .
+    "V=" currentSOD_V "`n" .
+    "A=" currentSOD_All
+    )
+
+    f := FileOpen(watchdogFile, "w")   ; creates or truncates       A      A       A        A       A        A   
+    f.Write(state)
+    f.Close()
+}
+
+
+LoadStateRAM() {
+    global watchdogFile
+    global currentSOD_H, currentSOD_V, currentSOD_All
+
+    if !FileExist(watchdogFile)
+        return false
+
+    try txt := FileRead(watchdogFile)
+    catch
+        return false
+
+    for line in StrSplit(txt, "`n") {
+        parts := StrSplit(line, "=")
+        if (parts.Length != 2)
+            continue
+
+        key := parts[1]
+        val := parts[2]
+
+        switch key {
+            case "Active":
+                szodActive := (val = "1")
+            case "H":
+                currentSOD_H := val
+            case "V":
+                currentSOD_V := val
+            case "A":
+                currentSOD_All := val
+        }
+    }
+    return true
+}
+
+if Safemod{
+    OnExit(HandleCrash)
+    }
+
+HandleCrash(ExitReason, ExitCode) {
+    SaveStateRAM()
+    global suppressOSD := true
+
+    FileAppend(
+        "OnExit fired! Reason=" ExitReason " Code=" ExitCode "`n",
+        A_Temp "\snaptivity_exit_log.txt"
+    )
+
+    ; Allow normal exits ONLY if ExitCode = 0
+    if (ExitReason = "Exit" && ExitCode = 0)
+        return
+
+    if (ExitReason = "Reload"
+     || ExitReason = "Menu"
+     || ExitReason = "Close"
+     || ExitReason = "Single")
+        return
+
+    ; Log crash details
+    LogCrash(ExitReason, ExitCode)
+
+    ; Everything else = crash → revive
+    Run('"' A_ScriptFullPath '"')
+}
+LogCrash(ExitReason, ExitCode) {
+    global CrashFailedDir
+    global LastCrashError
+    global szodActive, overrideMode, snappyMode, trulySnappy, splitLanes
+    global neutralizeMode, blockPhysical, Safemod
+    global currentSOD_H, currentSOD_V, currentSOD_All
+    global CrashTick
+
+    ts := FormatTime(A_Now, "yyyy-MM-dd_HH-mm-ss")
+    file := CrashFailedDir "\" ts ".log"
+
+    crashText :=
+    (
+    "🔥 SNAPTIVITY CRASH REPORT" "`n"
+    "=========================" "`n"
+    "Time:       " ts "`n"
+    "ExitReason: " ExitReason "`n"
+    "ExitCode:   " ExitCode "`n"
+    "`n"
+    "---- ENGINE STATE ----" "`n"
+    "Snaptivity Active: " szodActive "`n"
+    "Override Mode:     " overrideMode "`n"
+    "Split Lanes:       " splitLanes "`n"
+    "Snappy Mode:       " snappyMode "`n"
+    "Truly Snappy:      " trulySnappy "`n"
+    "Neutralize Mode:   " neutralizeMode "`n"
+    "Block Physical:    " blockPhysical "`n"
+    "SafeMod:           " Safemod "`n"
+    "`n"
+    "---- INPUT STATE ----" "`n"
+    "Current H: " currentSOD_H "`n"
+    "Current V: " currentSOD_V "`n"
+    "Current A: " currentSOD_All "`n"
+    "`n"
+    "---- CRASH LAB ----" "`n"
+    "CrashTick Counter: " CrashTick "`n"
+    "`n"
+    "---- SCRIPT INFO ----" "`n"
+    "Script:  " A_ScriptFullPath "`n"
+    "AHK Ver: " A_AhkVersion "`n"
+    "OS:      " A_OSVersion "`n"
+    "`n"
+    )
+
+    if (LastCrashError != "")
+        crashText .= "`n" LastCrashError
+    else
+        crashText .= "`n---- NO AHK ERROR ----`nThis was not an AHK exception (likely forced kill or ExitApp)."
+
+    FileAppend(crashText, file)
+    CleanupCrashLogs(5, CrashFailedDir)
+
+    return file
+}
+
+
+CleanupCrashLogs(max := 5, dir := "") {
+    if (dir = "")
+        return
+
+    while true {
+        count := 0
+        oldestFile := ""
+        oldestTime := 99999999999999
+
+        Loop Files, dir "\*.log", "F" {
+            count++
+            if (A_LoopFileTimeModified < oldestTime) {
+                oldestTime := A_LoopFileTimeModified
+                oldestFile := A_LoopFileFullPath
+            }
+        }
+
+        ; If we're under the limit, stop
+        if (count <= max)
+            break
+
+        ; Otherwise delete the oldest one
+        if (oldestFile != "")
+            FileDelete(oldestFile)
+        else
+            break
+    }
+}
+
+
+
+CaptureCrashError(e, mode) {
+    global LastCrashError
+
+    ; Build a full error report
+    LastCrashError :=
+    (
+    "---- AHK ERROR ----" "`n"
+    "Message: " e.Message "`n"
+    "What:    " e.What "`n"
+    "File:    " e.File "`n"
+    "Line:    " e.Line "`n"
+    "`n"
+    "---- STACK TRACE ----" "`n"
+    e.Stack
+    )
+
+    ; Let script terminate normally so OnExit runs
+    return false
+}
+
+MarkLastCrashRecovered() {
+    global CrashFailedDir, CrashRecoveredDir
+
+    ; find newest failed crash
+    latest := ""
+    latestTime := 0
+
+    Loop Files, CrashFailedDir "\*.log", "F" {
+        if (A_LoopFileTimeModified > latestTime) {
+            latestTime := A_LoopFileTimeModified
+            latest := A_LoopFileFullPath
+        }
+    }
+
+    if (latest != "") {
+        SplitPath(latest, &name)
+        FileMove(latest, CrashRecoveredDir "\" name, true)
+    }
+}
+
+
+
+GetRainbowColor() {
+    static idx := 0
+    rainbow := [
+        ; 🔴 Red → Orange
+        "FF0000","FF1100","FF2200","FF3300","FF4400","FF5500","FF6600","FF7700","FF8800","FF9900",
+        ; 🟠 Orange → Yellow
+        "FFAA00","FFBB00","FFCC00","FFDD00","FFEE00","FFFF00",
+        ; 🟡 Yellow → Green
+        "EEFF00","DDFF00","CCFF00","BBFF00","AAFF00","99FF00","88FF00","77FF00","66FF00","55FF00","44FF00","33FF00","22FF00","11FF00","00FF00",
+        ; 🟢 Green → Cyan
+        "00FF11","00FF22","00FF33","00FF44","00FF55","00FF66","00FF77","00FF88","00FF99","00FFAA","00FFBB","00FFCC","00FFDD","00FFEE","00FFFF",
+        ; 🟦 Cyan → Blue
+        "00EEFF","00DDFF","00CCFF","00BBFF","00AAFF","0099FF","0088FF","0077FF","0066FF","0055FF","0044FF","0033FF","0022FF","0011FF","0000FF",
+        ; 🔵 Blue → Violet
+        "1100FF","2200FF","3300FF","4400FF","5500FF","6600FF","7700FF","8800FF","9900FF","AA00FF","BB00FF","CC00FF","DD00FF","EE00FF","FF00FF",
+        ; 🟣 Violet → Back to Red
+        "FF00EE","FF00DD","FF00CC","FF00BB","FF00AA","FF0099","FF0088","FF0077","FF0066","FF0055","FF0044","FF0033","FF0022","FF0011"
+    ]
+
+    idx++
+    if (idx > rainbow.Length)
+        idx := 1
+
+    return rainbow[idx]
+}
+
+CreateGradientOSD() {
+    global osdGui, osdLetters, osdColors
+
+    ; do not create OSD here it already exists
+
+    word := "SNAPTIVITY: ON"
+
+    osdColors := [
+        "FF0000","FF0055","FF00AA","CC00FF","8800FF",
+        "4400FF","0044FF","0088FF","00CCFF","00FFCC",
+        "00FF88","00FF44","66FF00","99FF00" ; idk why but this isnt useful at all but if i dont keep this stuff breaks so no
+    ]
+
+    x := 0
+    Loop StrLen(word) {
+        char := SubStr(word, A_Index, 1)
+        c := osdColors[A_Index]
+
+        txt := osdGui.AddText("x" x " y0 c" c, char)
+        osdLetters.Push(txt)
+
+        txt.GetPos(,, &w,)
+        x += w
+    }
+}
+
+UpdateGradientOSD() {
+    global osdLetters, osdColors, cbNcoder, gradientTarget
+
+    osdColors.InsertAt(1, GetRainbowColor())
+    osdColors.RemoveAt(osdColors.Length)
+
+    if (gradientTarget = "osd") {
+        for i, txt in osdLetters
+            txt.Opt("c" osdColors[i])
+    }
+    else if (gradientTarget = "ncoder") {
+        ; Checkbox only has ONE color → take first gradient color
+        try cbNcoder.Opt("c" osdColors[1])
+    }
+}
+
+StartGradientOSD() {
+    global gradientTimerRunning
+    if (gradientTimerRunning)
+        return
+
+    gradientTimerRunning := true
+    SetTimer(UpdateGradientOSD, 16)   ; In ms
+}
+
+StopGradientOSD() {
+    global gradientTimerRunning
+    if (!gradientTimerRunning)
+        return
+
+    gradientTimerRunning := false
+    SetTimer(UpdateGradientOSD, 0)
 }
