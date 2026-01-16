@@ -372,6 +372,7 @@ Available crash types include:
 - Invalid DLL calls
 - Timer storms
 - Self-destruct & respawn
+
 ![Crash-types](Assets/Snaptivity-crashlist.png)
 
 Purpose:
