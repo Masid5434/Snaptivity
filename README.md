@@ -364,7 +364,8 @@ consider turning it off if you see StuckKeys that bypass checkstuck keys
 Provides direct access to controlled crash types for testing engine recovery.
 
 Available crash types include:
-![- Soft exception
+![
+- Soft exception
 - Hard process termination
 - Infinite loop freeze
 - Stack overflow
